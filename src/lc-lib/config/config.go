@@ -17,7 +17,7 @@
  * limitations under the License.
  */
 
-package core
+package config
 
 import (
 	"bytes"
@@ -45,12 +45,13 @@ const (
 	default_GeneralConfig_LogLevel           logging.Level = logging.INFO
 	default_GeneralConfig_LogStdout          bool          = true
 	default_GeneralConfig_LogSyslog          bool          = false
+	default_NetworkConfig_Method             string        = "failover"
 	default_NetworkConfig_Transport          string        = "tls"
 	default_NetworkConfig_Rfc2782Srv         bool          = true
 	default_NetworkConfig_Rfc2782Service     string        = "courier"
 	default_NetworkConfig_Timeout            time.Duration = 15 * time.Second
 	default_NetworkConfig_Reconnect          time.Duration = 1 * time.Second
-	default_NetworkConfig_MaxPendingPayloads int64         = 10
+	default_NetworkConfig_MaxPendingPayloads int64         = 4
 	default_StreamConfig_Codec               string        = "plain"
 	default_StreamConfig_DeadTime            int64         = 86400
 )
@@ -59,15 +60,7 @@ var (
 	default_GeneralConfig_Host string = "localhost.localdomain"
 )
 
-type Config struct {
-	General  GeneralConfig `config:"general"`
-	Network  NetworkConfig `config:"network"`
-	Files    []FileConfig  `config:"files"`
-	Includes []string      `config:"includes"`
-	Stdin    StreamConfig  `config:"stdin"`
-}
-
-type GeneralConfig struct {
+type General struct {
 	AdminEnabled     bool          `config:"admin enabled"`
 	AdminBind        string        `config:"admin listen address"`
 	PersistDir       string        `config:"persist directory"`
@@ -84,37 +77,42 @@ type GeneralConfig struct {
 	Host             string        `config:"host"`
 }
 
-type NetworkConfig struct {
+type Network struct {
 	Transport          string        `config:"transport"`
 	Servers            []string      `config:"servers"`
+	Method             string        `config:"method"`
 	Rfc2782Srv         bool          `config:"rfc 2782 srv"`
 	Rfc2782Service     string        `config:"rfc 2782 service"`
 	Timeout            time.Duration `config:"timeout"`
 	Reconnect          time.Duration `config:"reconnect"`
 	MaxPendingPayloads int64         `config:"max pending payloads"`
-
-	Unused           map[string]interface{}
-	TransportFactory TransportFactory
+	Factory            interface{}
+	Unused             map[string]interface{}
 }
 
-type CodecConfigStub struct {
-	Name string `config:"name"`
-
-	Unused map[string]interface{}
+type CodecStub struct {
+	Name    string `config:"name"`
+	Unused  map[string]interface{}
+	Factory interface{}
 }
 
-type StreamConfig struct {
+type Stream struct {
 	Fields   map[string]interface{} `config:"fields"`
-	Codec    CodecConfigStub        `config:"codec"`
+	Codec    CodecStub              `config:"codec"`
 	DeadTime time.Duration          `config:"dead time"`
-
-	CodecFactory CodecFactory
 }
 
-type FileConfig struct {
-	Paths []string `config:"paths"`
+type File struct {
+	Paths  []string `config:"paths"`
+	Stream          `config:",embed"`
+}
 
-	StreamConfig `config:",embed"`
+type Config struct {
+	General  General  `config:"general"`
+	Network  Network  `config:"network"`
+	Files    []File   `config:"files"`
+	Includes []string `config:"includes"`
+	Stdin    Stream   `config:"stdin"`
 }
 
 func NewConfig() *Config {
@@ -367,17 +365,35 @@ func (c *Config) Load(path string) (err error) {
 		}
 	}
 
+	if c.Network.Method == "" {
+		c.Network.Method = default_NetworkConfig_Method
+	}
+	if c.Network.Method != "failover" && c.Network.Method != "loadbalance" {
+		err = fmt.Errorf("The network method (/network/method) is not recognised: %s", c.Network.Method)
+		return
+	}
+
 	if len(c.Network.Servers) == 0 {
 		err = fmt.Errorf("No network servers were specified (/network/servers)")
 		return
 	}
 
+	servers := make(map[string]bool)
+	for _, server := range c.Network.Servers {
+		if _, exists := servers[server]; exists {
+			err = fmt.Errorf("The list of network servers (/network/servers) must be unique: %s appears multiple times", server)
+			return
+		}
+		servers[server] = true
+	}
+	servers = nil
+
 	if c.Network.Transport == "" {
 		c.Network.Transport = default_NetworkConfig_Transport
 	}
 
-	if registrar_func, ok := registered_Transports[c.Network.Transport]; ok {
-		if c.Network.TransportFactory, err = registrar_func(c, "/network/", c.Network.Unused, c.Network.Transport); err != nil {
+	if registrarFunc, ok := registeredTransports[c.Network.Transport]; ok {
+		if c.Network.Factory, err = registrarFunc(c, "/network/", c.Network.Unused, c.Network.Transport); err != nil {
 			return
 		}
 	} else {
@@ -399,7 +415,7 @@ func (c *Config) Load(path string) (err error) {
 	}
 
 	for k := range c.Files {
-		if err = c.initStreamConfig(fmt.Sprintf("/files[%d]/codec/", k), &c.Files[k].StreamConfig); err != nil {
+		if err = c.initStreamConfig(fmt.Sprintf("/files[%d]/codec/", k), &c.Files[k].Stream); err != nil {
 			return
 		}
 	}
@@ -411,13 +427,13 @@ func (c *Config) Load(path string) (err error) {
 	return
 }
 
-func (c *Config) initStreamConfig(path string, stream_config *StreamConfig) (err error) {
+func (c *Config) initStreamConfig(path string, stream_config *Stream) (err error) {
 	if stream_config.Codec.Name == "" {
 		stream_config.Codec.Name = default_StreamConfig_Codec
 	}
 
-	if registrar_func, ok := registered_Codecs[stream_config.Codec.Name]; ok {
-		if stream_config.CodecFactory, err = registrar_func(c, path, stream_config.Codec.Unused, stream_config.Codec.Name); err != nil {
+	if registrarFunc, ok := registeredCodecs[stream_config.Codec.Name]; ok {
+		if stream_config.Codec.Factory, err = registrarFunc(c, path, stream_config.Codec.Unused, stream_config.Codec.Name); err != nil {
 			return
 		}
 	} else {
@@ -433,11 +449,10 @@ func (c *Config) initStreamConfig(path string, stream_config *StreamConfig) (err
 	return nil
 }
 
-// TODO: This should be pushed to a wrapper or module
-//       It populated dynamic configuration, automatically converting time.Duration etc.
-//       Any config entries not found in the structure are moved to an "Unused" field if it exists
-//       or an error is reported if "Unused" is not available
-//       We can then take the unused configuration dynamically at runtime based on another value
+// PopulateConfig populates dynamic configuration, automatically converting time.Duration etc.
+// Any config entries not found in the structure are moved to an "Unused" field if it exists
+// or an error is reported if "Unused" is not available
+// We can then take the unused configuration dynamically at runtime based on another value
 func (c *Config) PopulateConfig(config interface{}, config_path string, raw_config map[string]interface{}) (err error) {
 	vconfig := reflect.ValueOf(config).Elem()
 FieldLoop:

@@ -95,7 +95,7 @@ harvested log file is closed you can adjust the [`"dead time"`](#dead-time)
 option.
 
 In the case of a network configuration change, Log Courier will disconnect and
-reconnect at the earliest opportunity.
+reconnect as required at the earliest opportunity.
 
 *Configuration reload is not currently available on Windows builds of Log
 Courier.*
@@ -109,7 +109,6 @@ Several configuration examples are available for you perusal.
 * [Ship from STDIN](examples/example-stdin.conf)
 * [Ship logs with extra field information](examples/example-fields.conf)
 * [Multiline log processing](examples/example-multiline.conf)
-* [Using ZMQ to load balance](examples/example-zmq.conf)
 
 The configuration is documented in full below.
 
@@ -373,52 +372,45 @@ not filled within this time limit, the spool will be flushed immediately.
 The network configuration tells Log Courier where to ship the logs, and also
 what transport and security to use.
 
-### `"curve server key"`
-
-*String. Required with "transport" = "zmq". Not allowed otherwise*
-
-The Z85-encoded public key that corresponds to the server(s) secret key. Used
-to verify the server(s) identity. This can be generated using the Genkey tool.
-
-### `"curve public key"`
-
-*String. Required with "transport" = "zmq". Not allowed otherwise*
-
-The Z85-encoded public key for this client. This can be generated using the
-Genkey tool.
-
-### `"curve secret key"`
-
-*String. Required with "transport" = "zmq". Not allowed otherwise*
-
-The Z85-encoded secret key for this client. This can be generated using the
-Genkey tool.
-
 ### `"max pending payloads"`
 
-*Number. Optional. Default: 10*
+*Number. Optional. Default: 4*
 
-The maximum number of spools that can be in transit at any one time. Each spool
-will be kept in memory until the remote server acknowledges it.
+The maximum number of spools that can be in transit to a single server at any
+one time. Each spool will be kept in memory until the remote server acknowledges
+it.
 
-If Log Courier has sent this many spools to the remote server, and has not yet
-received acknowledgement responses for them (either because the remote server
-is busy or because the link has high latency), it will pause and wait before
-sending anymore data.
+If Log Courier has sent this many spools to a remote server, and has not yet
+received acknowledgement responses for them (either because the remote server is
+busy or because the link has high latency), it will pause and wait before
+sending anymore.
 
 *For most installations you should leave this at the default as it is high
 enough to maintain throughput even on high latency links and low enough not to
 cause excessive memory usage.*
 
+### `"method"`
+
+*String. Optional. Default: "failover"
+Available values: "failover", "loadbalance"*
+
+Specified the method to use when managing multiple `"servers"`.
+
+`"failover"`: Connect to all servers, preferring the first server in the list
+that has not failed. If the preferred server fails, gracefully failover to the
+next available server. When a server recovers that is more preferred than the
+current server, failback gracefully.
+
+`"loadbalance"`: Connect to all servers, load balancing events between them.
+Faster servers will receive more events than slower servers. Equally fast
+servers will receive events in a round robin fashion.
+
 ### `"reconnect"`
 
 *Duration. Optional. Default: 1*
 
-Pause this long before reconnecting. If the remote server is completely down,
-this slows down the rate of reconnection attempts.
-
-When using the ZMQ transport, this is how long to wait before restarting the ZMQ
-stack when it was reset.
+Pause this long before reconnecting to a server. If the remote server is
+completely down, this slows down the rate of reconnection attempts.
 
 ### `"rfc 2782 srv"`
 
@@ -479,35 +471,21 @@ This is the maximum time Log Courier will wait for a server to respond to a
 request after logs were send to it. If the server does not respond within this
 time period the connection will be closed and reset.
 
-When using the ZMQ transport, this is the maximum amount of time Log Courier
-will wait for a response to a request. If any response is not received within
-this time period the corresponding request is retransmitted. If no responses are
-received within this time period, the entire ZMQ stack is reset.
-
 ### `"transport"`
 
 *String. Optional. Default: "tls"  
-Available values: "tcp", "tls", "plainzmq", "zmq"*
+Available values: "tcp", "tls"*
 
-*Depending on how log-courier was built, some transports may not be available.
+<!-- *Depending on how log-courier was built, some transports may not be available.
 Run `log-courier -list-supported` to see the list of transports available in
-a specific build of log-courier.*
+a specific build of log-courier.* -->
 
 Sets the transport to use when sending logs to the servers. "tls" is recommended
-for most users and connects to a single server at random, reconnecting to a
-different server at random each time the connection fails. "curvezmq" connects
-to all specified servers and load balances events across them.
+for most users.
 
-"tcp" and "plainzmq" are **insecure** equivalents to "tls" and "zmq"
-respectively that do not encrypt traffic or authenticate the identity of
-servers. These should only be used on trusted internal networks. If in doubt,
-use the secure authenticating transports "tls" and "zmq".
-
-"plainzmq" is only available if Log Courier was compiled with the "with=zmq3" or
-"with=zmq4" options.
-
-"zmq" is only available if Log Courier was compiled with the "with=zmq4"
-option.
+"tcp" is an **insecure** equivalent to "tls" that does not encrypt traffic or
+authenticate the identity of servers. This should only be used on trusted
+internal networks. If in doubt, use the secure authenticating transport "tls".
 
 ## `"files"`
 
